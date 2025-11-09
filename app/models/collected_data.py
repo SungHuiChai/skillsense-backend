@@ -19,6 +19,7 @@ class CollectedSource(Base):
         String(36),
         ForeignKey("cv_submissions.id", ondelete="CASCADE"),
         nullable=False,
+        unique=True,
         index=True
     )
     source_type = Column(String(50), nullable=False, index=True)
@@ -71,6 +72,7 @@ class GitHubData(Base):
         String(36),
         ForeignKey("cv_submissions.id", ondelete="CASCADE"),
         nullable=False,
+        unique=True,
         index=True
     )
 
@@ -128,6 +130,7 @@ class WebMention(Base):
         String(36),
         ForeignKey("cv_submissions.id", ondelete="CASCADE"),
         nullable=False,
+        unique=True,
         index=True
     )
 
@@ -338,6 +341,7 @@ class SkillWebMention(Base):
         String(36),
         ForeignKey("cv_submissions.id", ondelete="CASCADE"),
         nullable=False,
+        unique=True,
         index=True
     )
 

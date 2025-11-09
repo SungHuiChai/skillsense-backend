@@ -12,7 +12,7 @@ from typing import Dict, Set
 
 from app.config import settings
 from app.database import init_db
-from app.api import auth, cv_upload, extraction, admin, collection, profile, processing, skills
+from app.api import auth, cv_upload, extraction, admin, collection, profile, processing, skills, hr
 
 # Configure logging
 logging.basicConfig(
@@ -112,6 +112,7 @@ app.include_router(collection.router, prefix=settings.API_V1_PREFIX)  # Phase 2
 app.include_router(profile.router, prefix=settings.API_V1_PREFIX)  # Phase 2: Profile
 app.include_router(processing.router)  # Phase 3: Processing Layer
 app.include_router(skills.router)  # Phase 3: Skills API
+app.include_router(hr.router, prefix=settings.API_V1_PREFIX)  # HR Dashboard
 
 
 # WebSocket Connection Manager
@@ -268,7 +269,8 @@ async def api_info():
             "collection": f"{settings.API_V1_PREFIX}/collection",
             "profile": f"{settings.API_V1_PREFIX}/profile",
             "processing": f"{settings.API_V1_PREFIX}/processing",
-            "skills": f"{settings.API_V1_PREFIX}/skills"
+            "skills": f"{settings.API_V1_PREFIX}/skills",
+            "hr": f"{settings.API_V1_PREFIX}/hr"
         }
     }
 
