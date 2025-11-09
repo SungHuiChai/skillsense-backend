@@ -13,13 +13,17 @@ from app.database import Base
 class CollectedSource(Base):
     """Track collection status for each external data source"""
     __tablename__ = "collected_sources"
+    __table_args__ = (
+        # Unique constraint on (submission_id, source_type) combination
+        # This allows multiple sources (github, web_search, etc.) per submission
+        {'extend_existing': True},
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     submission_id = Column(
         String(36),
         ForeignKey("cv_submissions.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
         index=True
     )
     source_type = Column(String(50), nullable=False, index=True)
@@ -50,6 +54,12 @@ class CollectedSource(Base):
     web_mentions = relationship(
         "WebMention",
         back_populates="source",
+        cascade="all, delete-orphan"
+    )
+    linkedin_data = relationship(
+        "LinkedInData",
+        back_populates="source",
+        uselist=False,
         cascade="all, delete-orphan"
     )
 
@@ -104,6 +114,11 @@ class GitHubData(Base):
     technologies = Column(JSON)  # Array of technologies used
     frameworks = Column(JSON)  # Frameworks detected
 
+    # Enhanced data for GPT analysis
+    readme_samples = Column(JSON)  # Top repo READMEs with metadata
+    commit_samples = Column(JSON)  # Recent commit messages
+    commit_statistics = Column(JSON)  # Commit patterns and statistics
+
     # Metadata
     raw_data = Column(JSON)  # Full API response
     collected_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -130,7 +145,6 @@ class WebMention(Base):
         String(36),
         ForeignKey("cv_submissions.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
         index=True
     )
 
@@ -164,6 +178,60 @@ class WebMention(Base):
 
     def __repr__(self):
         return f"<WebMention {self.title[:50]}>"
+
+
+class LinkedInData(Base):
+    """LinkedIn profile data collected via web search"""
+    __tablename__ = "linkedin_data"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    source_id = Column(
+        String(36),
+        ForeignKey("collected_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    submission_id = Column(
+        String(36),
+        ForeignKey("cv_submissions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True
+    )
+
+    # Profile data
+    profile_url = Column(String(500), nullable=False)
+    username = Column(String(255), index=True)
+    full_name = Column(String(255))
+    headline = Column(Text)  # Professional headline/tagline
+    summary = Column(Text)  # Profile summary/about section
+
+    # Experience (JSONB for flexible storage)
+    experience = Column(JSON)  # Array of job objects {title, company, description, dates}
+    education = Column(JSON)  # Array of education objects
+    certifications = Column(JSON)  # Array of certification objects
+
+    # Skills and endorsements
+    skills = Column(JSON)  # Array of skill objects {name, endorsements}
+
+    # Additional content
+    recommendations = Column(JSON)  # Array of recommendation texts
+    posts_sample = Column(JSON)  # Sample of recent posts (if available)
+
+    # Collection metadata
+    data_source = Column(String(50))  # 'tavily_search', 'url_only', 'search_failed'
+    collection_method = Column(String(50))  # 'web_search', 'tavily_unavailable', etc.
+    error_message = Column(Text)  # If collection failed
+
+    # Raw data
+    raw_search_results = Column(JSON)  # Top search results for context
+    collected_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    source = relationship("CollectedSource", back_populates="linkedin_data")
+
+    def __repr__(self):
+        return f"<LinkedInData {self.username}>"
 
 
 class AggregatedProfile(Base):
@@ -341,7 +409,6 @@ class SkillWebMention(Base):
         String(36),
         ForeignKey("cv_submissions.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
         index=True
     )
 

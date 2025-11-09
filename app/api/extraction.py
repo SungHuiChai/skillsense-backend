@@ -24,25 +24,37 @@ from app.services.collection_orchestrator import CollectionOrchestrator
 router = APIRouter(prefix="/extraction", tags=["Extraction"])
 
 
-def format_extracted_data(extracted_data: ExtractedData, submission: CVSubmission) -> Dict[str, Any]:
+def format_extracted_data(extracted_data: ExtractedData, submission: CVSubmission, user: User = None) -> Dict[str, Any]:
     """
     Format extracted data for API response
 
     Args:
         extracted_data: ExtractedData model instance
         submission: CVSubmission model instance
+        user: User model instance (optional, used to auto-populate full_name if missing)
 
     Returns:
         Dict: Formatted extracted data
     """
+    # Auto-populate full_name from user registration if extraction didn't find it
+    full_name_value = extracted_data.full_name
+    full_name_confidence = float(extracted_data.full_name_confidence) if extracted_data.full_name_confidence else 0
+    
+    # If full_name is missing or empty, use the user's registered full_name
+    if (not full_name_value or full_name_value.strip() == '') and user and user.full_name:
+        full_name_value = user.full_name
+        # Set a lower confidence since it's from registration, not CV extraction
+        if full_name_confidence == 0:
+            full_name_confidence = 50.0  # Medium confidence for registration data
+    
     return {
         "submission_id": str(submission.id),
         "status": submission.status,
         "extracted_data": {
             "personal_info": {
                 "full_name": {
-                    "value": extracted_data.full_name,
-                    "confidence": float(extracted_data.full_name_confidence) if extracted_data.full_name_confidence else 0
+                    "value": full_name_value,
+                    "confidence": full_name_confidence
                 },
                 "email": {
                     "value": extracted_data.email,
@@ -145,7 +157,7 @@ async def get_extraction(
             detail="Extracted data not found"
         )
 
-    return format_extracted_data(extracted_data, submission)
+    return format_extracted_data(extracted_data, submission, current_user)
 
 
 @router.get("/{submission_id}/status", response_model=ExtractionStatusResponse)
@@ -237,6 +249,17 @@ async def validate_extraction(
     """
     logger = logging.getLogger(__name__)
 
+    # DEBUG: Log the incoming payload
+    logger.info(f"=== VALIDATE PAYLOAD DEBUG ===")
+    logger.info(f"submission_id: {submission_id}")
+    logger.info(f"update_data.full_name: {update_data.full_name}")
+    logger.info(f"update_data.email: {update_data.email}")
+    logger.info(f"update_data.phone: {update_data.phone}")
+    logger.info(f"update_data.location: {update_data.location}")
+    logger.info(f"update_data dict: {update_data.model_dump()}")
+    logger.info(f"=== END DEBUG ===")
+
+
     # Get submission
     submission = db.query(CVSubmission).filter(CVSubmission.id == submission_id).first()
 
@@ -315,14 +338,14 @@ async def validate_extraction(
     db.refresh(extracted_data)
     db.refresh(submission)
 
-    # Auto-trigger GitHub crawl if URL changed OR if first validation with GitHub URL
-    should_trigger_collection = github_url_changed and new_github_url
+    # Auto-trigger collection EVERY TIME validation is saved if GitHub URL exists
+    should_trigger_collection = False
+    new_github_url = None
 
-    # Also trigger if first validation and GitHub URL exists
-    if not should_trigger_collection and was_unvalidated and update_data.is_validated:
-        if extracted_data.github_url:
-            should_trigger_collection = True
-            new_github_url = extracted_data.github_url
+    # Trigger if user is validating AND has a GitHub URL
+    if update_data.is_validated and extracted_data.github_url:
+        should_trigger_collection = True
+        new_github_url = extracted_data.github_url
 
     if should_trigger_collection and new_github_url:
         logger.info(f"DEBUG: should_trigger_collection=True, new_github_url={new_github_url}")
@@ -386,7 +409,7 @@ async def validate_extraction(
             # Log validation error but don't fail the update
             logger.warning(f"GitHub URL validation failed: {e}")
 
-    return format_extracted_data(extracted_data, submission)
+    return format_extracted_data(extracted_data, submission, current_user)
 
 
 @router.get("/{submission_id}/edits", response_model=list)

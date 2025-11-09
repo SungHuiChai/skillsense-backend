@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 from decimal import Decimal
 import logging
+import asyncio
 
 from app.models.cv_submission import CVSubmission
 from app.models.extracted_data import ExtractedData
@@ -15,8 +16,10 @@ from app.models.collected_data import (
     CollectedSource,
     GitHubData,
     WebMention,
+    LinkedInData,
     AggregatedProfile
 )
+from app.services.gpt_scoring_service import get_gpt_scoring_service
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +27,17 @@ logger = logging.getLogger(__name__)
 class DataAggregator:
     """Aggregates data from multiple sources into a unified profile"""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, use_gpt_quality: bool = True):
         """
         Initialize aggregator with database session.
 
         Args:
             db: SQLAlchemy database session
+            use_gpt_quality: If True, use GPT for profile quality assessment
         """
         self.db = db
+        self.use_gpt_quality = use_gpt_quality
+        self.gpt_scorer = get_gpt_scoring_service() if use_gpt_quality else None
 
     async def aggregate(self, submission_id: str) -> AggregatedProfile:
         """
@@ -57,6 +63,10 @@ class DataAggregator:
         web_mentions = self.db.query(WebMention).filter(
             WebMention.submission_id == submission_id
         ).all()
+
+        linkedin_data = self.db.query(LinkedInData).filter(
+            LinkedInData.submission_id == submission_id
+        ).first()
 
         sources = self.db.query(CollectedSource).filter(
             CollectedSource.submission_id == submission_id
@@ -90,15 +100,27 @@ class DataAggregator:
         github_contributions = github_data.public_repos if github_data else 0
         web_mentions_count = len(web_mentions)
 
-        # Quality scores
-        overall_quality = self._calculate_overall_quality(
-            completeness,
-            name_consistency,
-            location_consistency,
-            github_data,
-            web_mentions
-        )
-        data_freshness = self._calculate_freshness_score(github_data, web_mentions)
+        # Quality scores (GPT or legacy)
+        if self.use_gpt_quality and self.gpt_scorer:
+            # Use GPT for comprehensive profile quality assessment
+            gpt_quality = asyncio.run(self._calculate_gpt_profile_quality(
+                github_data,
+                linkedin_data,
+                web_mentions,
+                extracted_data
+            ))
+            overall_quality = gpt_quality.get("overall_quality_score", 50.0)
+            data_freshness = gpt_quality.get("data_freshness", 50.0)
+        else:
+            # Use legacy mathematical quality calculation
+            overall_quality = self._calculate_legacy_quality(
+                completeness,
+                name_consistency,
+                location_consistency,
+                github_data,
+                web_mentions
+            )
+            data_freshness = self._calculate_freshness_score(github_data, web_mentions)
 
         # Create or update aggregated profile
         aggregated = self.db.query(AggregatedProfile).filter(
@@ -385,7 +407,106 @@ class DataAggregator:
         cross_validated = sum(1 for sources in skill_sources.values() if len(sources) > 1)
         return cross_validated
 
-    def _calculate_overall_quality(
+    async def _calculate_gpt_profile_quality(
+        self,
+        github_data: Optional[GitHubData],
+        linkedin_data: Optional[LinkedInData],
+        web_mentions: List[WebMention],
+        extracted_data: Optional[ExtractedData]
+    ) -> Dict[str, Any]:
+        """
+        Calculate profile quality using GPT-4o analysis.
+
+        Args:
+            github_data: GitHub data with enhanced fields
+            linkedin_data: LinkedIn profile data
+            web_mentions: List of web mentions
+            extracted_data: CV extracted data
+
+        Returns:
+            Dictionary with quality metrics from GPT
+        """
+        logger.info("Calculating profile quality using GPT")
+
+        # Prepare data for GPT scoring
+        github_dict = None
+        if github_data:
+            github_dict = {
+                "username": github_data.username,
+                "name": github_data.name,
+                "bio": github_data.bio,
+                "public_repos": github_data.public_repos,
+                "followers": github_data.followers,
+                "languages": github_data.languages,
+                "repositories": github_data.repositories,
+                "readme_samples": github_data.readme_samples,
+                "commit_samples": github_data.commit_samples,
+                "commit_statistics": github_data.commit_statistics
+            }
+
+        linkedin_dict = None
+        if linkedin_data:
+            linkedin_dict = {
+                "full_name": linkedin_data.full_name,
+                "headline": linkedin_data.headline,
+                "summary": linkedin_data.summary,
+                "experience": linkedin_data.experience,
+                "skills": linkedin_data.skills,
+                "education": linkedin_data.education
+            }
+
+        web_mentions_list = []
+        if web_mentions:
+            web_mentions_list = [
+                {
+                    "title": m.title,
+                    "url": m.url,
+                    "snippet": m.snippet,
+                    "source_name": m.source_name,
+                    "source_type": m.source_type
+                }
+                for m in web_mentions
+            ]
+
+        cv_dict = None
+        if extracted_data:
+            skills_data = extracted_data.skills
+            if isinstance(skills_data, list):
+                skills = [s.get("name") if isinstance(s, dict) else s for s in skills_data]
+            elif isinstance(skills_data, dict):
+                skills = skills_data.get("technical_skills", [])
+            else:
+                skills = []
+
+            cv_dict = {
+                "skills": skills,
+                "work_history": extracted_data.work_history,
+                "education": extracted_data.education
+            }
+
+        # Call GPT scoring service
+        gpt_result = await self.gpt_scorer.calculate_profile_quality(
+            github_data=github_dict,
+            linkedin_data=linkedin_dict,
+            web_mentions=web_mentions_list,
+            cv_data=cv_dict
+        )
+
+        # Extract relevant metrics
+        return {
+            "overall_quality_score": gpt_result.get("overall_quality_score", 50.0),
+            "profile_completeness": gpt_result.get("profile_completeness", 50.0),
+            "technical_depth": gpt_result.get("technical_depth", "medium"),
+            "professional_presence": gpt_result.get("professional_presence", "medium"),
+            "activity_level": gpt_result.get("activity_level", "moderate"),
+            "data_freshness": 80.0,  # Default freshness for recent collection
+            "hirability_score": gpt_result.get("hirability_score", 50.0),
+            "strengths": gpt_result.get("strengths", []),
+            "areas_for_improvement": gpt_result.get("areas_for_improvement", []),
+            "summary": gpt_result.get("summary", "")
+        }
+
+    def _calculate_legacy_quality(
         self,
         completeness: float,
         name_consistency: float,
@@ -394,7 +515,7 @@ class DataAggregator:
         web_mentions: List[WebMention]
     ) -> float:
         """
-        Calculate overall data quality score.
+        Calculate overall data quality score using legacy mathematical formula.
 
         Args:
             completeness: Collection completeness percentage

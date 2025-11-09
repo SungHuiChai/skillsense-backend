@@ -343,9 +343,20 @@ async def analyze_github_with_ai(
         'frameworks': github_data.frameworks
     }
 
-    # Analyze with OpenAI
+    # Get resume/CV content from extracted data
+    from app.models.extracted_data import ExtractedData
+    resume_content = None
+    extracted_data = db.query(ExtractedData).filter(
+        ExtractedData.submission_id == str(submission_id)
+    ).first()
+    
+    if extracted_data and extracted_data.raw_text:
+        resume_content = extracted_data.raw_text
+        logger.info(f"Found resume content ({len(resume_content)} characters) for analysis")
+
+    # Analyze with OpenAI (now includes resume content)
     analyzer = OpenAIAnalyzer()
-    skills_analysis = await analyzer.extract_skills_from_github(github_dict)
+    skills_analysis = await analyzer.extract_skills_from_github(github_dict, resume_content)
 
     return {
         "submission_id": str(submission_id),

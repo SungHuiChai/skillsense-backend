@@ -184,7 +184,7 @@ class CollectionOrchestrator:
         if extracted_data.github_url:
             sources['github'] = extracted_data.github_url
 
-        # Always try web search if we have a name
+        # Always try web search if we have a name (using Tavily)
         if extracted_data.full_name:
             sources['web_search'] = extracted_data.full_name
 
@@ -517,6 +517,7 @@ class CollectionOrchestrator:
     async def _analyze_github_with_ai(self, submission_id: str, github_data):
         """
         Analyze GitHub data with GPT-4o and save results
+        Also includes resume/CV content for comprehensive skills analysis
 
         Args:
             submission_id: Submission UUID
@@ -525,6 +526,7 @@ class CollectionOrchestrator:
         try:
             from app.services.openai_analyzer import OpenAIAnalyzer
             from app.models.collected_data import GitHubAnalysis
+            from app.models.extracted_data import ExtractedData
 
             logger.info(f"Starting GPT-4o analysis for submission {submission_id}")
 
@@ -548,9 +550,19 @@ class CollectionOrchestrator:
                 'frameworks': github_data.frameworks
             }
 
-            # Analyze with OpenAI
+            # Get resume/CV content from extracted data
+            resume_content = None
+            extracted_data = self.db.query(ExtractedData).filter(
+                ExtractedData.submission_id == submission_id
+            ).first()
+            
+            if extracted_data and extracted_data.raw_text:
+                resume_content = extracted_data.raw_text
+                logger.info(f"Found resume content ({len(resume_content)} characters) for submission {submission_id}")
+
+            # Analyze with OpenAI (now includes resume content)
             analyzer = OpenAIAnalyzer()
-            analysis_result = await analyzer.comprehensive_analysis(github_dict)
+            analysis_result = await analyzer.comprehensive_analysis(github_dict, resume_content)
 
             skills_analysis = analysis_result.get('skills_analysis', {})
             activity_analysis = analysis_result.get('activity_analysis', {})

@@ -10,9 +10,10 @@ import logging
 
 from app.services.skill_normalization import get_normalization_service
 from app.services.confidence_calculator import get_confidence_calculator
+from app.services.gpt_scoring_service import get_gpt_scoring_service
 from app.services.hallucination_detector import get_hallucination_detector
 from app.models.extracted_data import ExtractedData
-from app.models.collected_data import GitHubData, GitHubAnalysis, StackOverflowData, SkillWebMention
+from app.models.collected_data import GitHubData, GitHubAnalysis, StackOverflowData, SkillWebMention, LinkedInData, WebMention
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,18 @@ class SkillValidationService:
     5. Generate validated skill profile
     """
 
-    def __init__(self):
-        """Initialize validation service with dependencies"""
+    def __init__(self, use_gpt_scoring: bool = True):
+        """Initialize validation service with dependencies
+
+        Args:
+            use_gpt_scoring: If True, use GPT-based scoring. If False, use legacy mathematical scoring.
+        """
         self.normalizer = get_normalization_service()
-        self.confidence_calc = get_confidence_calculator()
+        self.confidence_calc = get_confidence_calculator()  # Legacy fallback
+        self.gpt_scorer = get_gpt_scoring_service()
         self.hallucination_detector = get_hallucination_detector()
+        self.use_gpt_scoring = use_gpt_scoring
+        logger.info(f"Skill validation service initialized with {'GPT' if use_gpt_scoring else 'legacy'} scoring")
 
     def validate_submission_skills(
         self,
@@ -61,13 +69,20 @@ class SkillValidationService:
         # 3. Build skill-source mapping
         skill_sources = self._build_skill_source_mapping(normalized_skills, source_skills)
 
-        # 4. Gather evidence for each skill
+        # 4. Gather evidence and enhanced data for scoring
         evidence_map = self._gather_skill_evidence(submission_id, db, skill_sources)
+        enhanced_data = self._gather_enhanced_data(submission_id, db)
 
-        # 5. Calculate confidence scores
-        confidence_results = self._calculate_all_confidence_scores(
-            skill_sources, evidence_map
-        )
+        # 5. Calculate confidence scores (GPT or legacy)
+        if self.use_gpt_scoring:
+            import asyncio
+            confidence_results = asyncio.run(self._calculate_gpt_confidence_scores(
+                skill_sources, enhanced_data
+            ))
+        else:
+            confidence_results = self._calculate_legacy_confidence_scores(
+                skill_sources, evidence_map
+            )
 
         # 6. Detect hallucinations
         hallucination_results = self.hallucination_detector.analyze_skill_list(
@@ -324,12 +339,66 @@ class SkillValidationService:
 
         return evidence_map
 
-    def _calculate_all_confidence_scores(
+    async def _calculate_gpt_confidence_scores(
+        self,
+        skill_sources: Dict[str, Dict[str, bool]],
+        enhanced_data: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Calculate confidence scores using GPT-4o analysis"""
+        logger.info("Using GPT scoring for skill confidence")
+
+        # Get all unique skills
+        all_skills = list(skill_sources.keys())
+
+        # Use batch scoring for efficiency
+        gpt_scores = await self.gpt_scorer.score_multiple_skills(
+            skills=all_skills,
+            github_data=enhanced_data.get("github_data"),
+            linkedin_data=enhanced_data.get("linkedin_data"),
+            web_mentions=enhanced_data.get("web_mentions"),
+            cv_data=enhanced_data.get("cv_data")
+        )
+
+        # Transform GPT scores to match expected format
+        results = []
+        for score in gpt_scores:
+            # Map GPT confidence_score to confidence_level
+            conf_score = score.get("confidence_score", 0)
+            if conf_score >= 90:
+                conf_level = "expert"
+            elif conf_score >= 75:
+                conf_level = "high"
+            elif conf_score >= 60:
+                conf_level = "medium"
+            elif conf_score >= 40:
+                conf_level = "low"
+            else:
+                conf_level = "very_low"
+
+            results.append({
+                "skill": score.get("skill"),
+                "confidence_score": conf_score,
+                "confidence_level": conf_level,
+                "proficiency_level": score.get("proficiency_level"),
+                "years_experience": score.get("years_experience"),
+                "evidence_quality": score.get("evidence_quality"),
+                "reasoning": score.get("reasoning"),
+                "data_sources_used": score.get("data_sources_used", []),
+                "key_evidence": score.get("key_evidence", []),
+                "red_flags": score.get("red_flags", []),
+                "scored_at": score.get("scored_at")
+            })
+
+        logger.info(f"GPT scored {len(results)} skills")
+        return results
+
+    def _calculate_legacy_confidence_scores(
         self,
         skill_sources: Dict[str, Dict[str, bool]],
         evidence_map: Dict[str, Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Calculate confidence scores for all skills"""
+        """Calculate confidence scores using legacy mathematical scoring"""
+        logger.info("Using legacy mathematical scoring")
         results = []
 
         for skill, sources in skill_sources.items():
@@ -342,6 +411,108 @@ class SkillValidationService:
             results.append(confidence)
 
         return results
+
+    def _gather_enhanced_data(
+        self,
+        submission_id: UUID,
+        db: Session
+    ) -> Dict[str, Any]:
+        """
+        Gather enhanced data for GPT scoring.
+
+        Collects:
+        - GitHub data with README samples and commit messages
+        - LinkedIn profile data
+        - Web mentions
+        - CV data
+        """
+        logger.info("Gathering enhanced data for GPT scoring")
+
+        enhanced_data = {
+            "github_data": None,
+            "linkedin_data": None,
+            "web_mentions": [],
+            "cv_data": None
+        }
+
+        # GitHub data (with enhanced fields)
+        github_data_db = db.query(GitHubData).filter(
+            GitHubData.submission_id == str(submission_id)
+        ).first()
+
+        if github_data_db:
+            enhanced_data["github_data"] = {
+                "username": github_data_db.username,
+                "name": github_data_db.name,
+                "bio": github_data_db.bio,
+                "public_repos": github_data_db.public_repos,
+                "followers": github_data_db.followers,
+                "languages": github_data_db.languages,
+                "repositories": github_data_db.repositories,
+                "readme_samples": github_data_db.readme_samples,  # NEW: Enhanced data
+                "commit_samples": github_data_db.commit_samples,  # NEW: Enhanced data
+                "commit_statistics": github_data_db.commit_statistics  # NEW: Enhanced data
+            }
+
+        # LinkedIn data
+        linkedin_data_db = db.query(LinkedInData).filter(
+            LinkedInData.submission_id == str(submission_id)
+        ).first()
+
+        if linkedin_data_db:
+            enhanced_data["linkedin_data"] = {
+                "full_name": linkedin_data_db.full_name,
+                "headline": linkedin_data_db.headline,
+                "summary": linkedin_data_db.summary,
+                "experience": linkedin_data_db.experience,
+                "skills": linkedin_data_db.skills,
+                "education": linkedin_data_db.education
+            }
+
+        # Web mentions
+        web_mentions_db = db.query(WebMention).filter(
+            WebMention.submission_id == str(submission_id)
+        ).all()
+
+        if web_mentions_db:
+            enhanced_data["web_mentions"] = [
+                {
+                    "title": m.title,
+                    "url": m.url,
+                    "snippet": m.snippet,
+                    "source_name": m.source_name,
+                    "source_type": m.source_type,
+                    "content": m.full_content
+                }
+                for m in web_mentions_db
+            ]
+
+        # CV data
+        extracted_data = db.query(ExtractedData).filter(
+            ExtractedData.submission_id == str(submission_id)
+        ).first()
+
+        if extracted_data:
+            # Extract skills list
+            skills_data = extracted_data.skills
+            if isinstance(skills_data, list):
+                skills = [s.get("name") if isinstance(s, dict) else s for s in skills_data]
+            elif isinstance(skills_data, dict):
+                skills = skills_data.get("technical_skills", [])
+            else:
+                skills = []
+
+            enhanced_data["cv_data"] = {
+                "skills": skills,
+                "work_history": extracted_data.work_history,
+                "education": extracted_data.education
+            }
+
+        logger.info(f"Enhanced data gathered - GitHub: {enhanced_data['github_data'] is not None}, "
+                   f"LinkedIn: {enhanced_data['linkedin_data'] is not None}, "
+                   f"Web mentions: {len(enhanced_data['web_mentions'])}")
+
+        return enhanced_data
 
     def _build_final_skill_list(
         self,
@@ -365,11 +536,28 @@ class SkillValidationService:
                 "confidence_score": confidence_data.get("confidence_score", 0),
                 "confidence_level": confidence_data.get("confidence_level", "unknown"),
                 "sources": [s for s, found in sources.items() if found],
-                "source_count": sum(1 for found in sources.values() if found),
-                "base_score": confidence_data.get("base_score", 0),
-                "bonuses": confidence_data.get("bonuses", {}),
-                "total_bonus": confidence_data.get("total_bonus", 0)
+                "source_count": sum(1 for found in sources.values() if found)
             }
+
+            # Add GPT-specific fields if available
+            if self.use_gpt_scoring:
+                skill_data.update({
+                    "proficiency_level": confidence_data.get("proficiency_level"),
+                    "years_experience": confidence_data.get("years_experience"),
+                    "evidence_quality": confidence_data.get("evidence_quality"),
+                    "reasoning": confidence_data.get("reasoning"),
+                    "data_sources_used": confidence_data.get("data_sources_used", []),
+                    "key_evidence": confidence_data.get("key_evidence", []),
+                    "red_flags": confidence_data.get("red_flags", []),
+                    "scored_at": confidence_data.get("scored_at")
+                })
+            else:
+                # Legacy fields for backward compatibility
+                skill_data.update({
+                    "base_score": confidence_data.get("base_score", 0),
+                    "bonuses": confidence_data.get("bonuses", {}),
+                    "total_bonus": confidence_data.get("total_bonus", 0)
+                })
 
             final_skills.append(skill_data)
 

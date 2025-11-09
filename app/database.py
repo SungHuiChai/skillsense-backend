@@ -9,11 +9,20 @@ from typing import Generator
 from app.config import settings
 
 # Create database engine
+# Add connect_args for better IPv6 and SSL support
+connect_args = {}
+if settings.DATABASE_URL.startswith("postgresql"):
+    connect_args = {
+        "connect_timeout": 10,
+        "options": "-c timezone=utc"
+    }
+
 engine = create_engine(
     settings.DATABASE_URL,
     pool_pre_ping=True,  # Verify connections before using
     pool_size=10,
-    max_overflow=20
+    max_overflow=20,
+    connect_args=connect_args
 )
 
 # Create session factory

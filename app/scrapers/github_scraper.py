@@ -100,6 +100,15 @@ class GitHubScraper(BaseScraper):
                 frameworks = self._extract_frameworks(repos_data)
                 top_repos = self._get_top_repos(repos_data, limit=5)
 
+                # Collect READMEs from top repos (for GPT analysis)
+                readme_samples = await self._collect_readme_samples(client, username, repos_data, limit=10)
+
+                # Collect commit samples from top repos (for GPT analysis)
+                commit_samples = await self._collect_commit_samples(client, username, repos_data, limit=50)
+
+                # Calculate commit statistics
+                commit_statistics = self._calculate_commit_statistics(commit_samples)
+
                 result = {
                     "username": user_data.get("login"),
                     "name": user_data.get("name"),
@@ -119,6 +128,9 @@ class GitHubScraper(BaseScraper):
                     "commit_activity": {},
                     "technologies": technologies,
                     "frameworks": frameworks,
+                    "readme_samples": readme_samples,  # NEW: README content for GPT
+                    "commit_samples": commit_samples,  # NEW: Commit messages for GPT
+                    "commit_statistics": commit_statistics,  # NEW: Commit patterns
                     "raw_data": {
                         "user": user_data,
                         "repos": repos_data[:10]  # Limit to save space
@@ -307,6 +319,209 @@ class GitHubScraper(BaseScraper):
                     frameworks.add(framework)
 
         return sorted(list(frameworks))
+
+    async def _collect_readme_samples(
+        self,
+        client: httpx.AsyncClient,
+        username: str,
+        repos: List[Dict],
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Collect README content from top repositories for GPT analysis.
+
+        Args:
+            client: HTTP client
+            username: GitHub username
+            repos: List of repository data
+            limit: Maximum number of READMEs to collect
+
+        Returns:
+            List of README samples with metadata
+        """
+        readme_samples = []
+
+        # Sort repos by stars and recency
+        sorted_repos = sorted(
+            repos,
+            key=lambda x: (x.get("stargazers_count", 0), x.get("updated_at", "")),
+            reverse=True
+        )[:limit]
+
+        for repo in sorted_repos:
+            repo_name = repo.get("name")
+            if not repo_name:
+                continue
+
+            try:
+                # Fetch README from GitHub API
+                response = await client.get(
+                    f"{self.api_base}/repos/{username}/{repo_name}/readme",
+                    headers=self.headers
+                )
+
+                if response.status_code == 200:
+                    readme_data = response.json()
+                    # Content is base64 encoded
+                    import base64
+                    content = base64.b64decode(readme_data.get("content", "")).decode("utf-8")
+
+                    # Limit content length (first 3000 chars for GPT)
+                    content_preview = content[:3000] if len(content) > 3000 else content
+
+                    readme_samples.append({
+                        "repo_name": repo_name,
+                        "repo_description": repo.get("description"),
+                        "stars": repo.get("stargazers_count", 0),
+                        "language": repo.get("language"),
+                        "topics": repo.get("topics", []),
+                        "content": content_preview,
+                        "content_length": len(content),
+                        "url": readme_data.get("html_url")
+                    })
+                    logger.debug(f"Collected README from {repo_name}")
+
+            except Exception as e:
+                logger.debug(f"Could not fetch README for {repo_name}: {e}")
+                continue
+
+        logger.info(f"Collected {len(readme_samples)} README samples")
+        return readme_samples
+
+    async def _collect_commit_samples(
+        self,
+        client: httpx.AsyncClient,
+        username: str,
+        repos: List[Dict],
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Collect recent commit messages for GPT analysis.
+
+        Args:
+            client: HTTP client
+            username: GitHub username
+            repos: List of repository data
+            limit: Maximum number of commits to collect
+
+        Returns:
+            List of commit samples with metadata
+        """
+        commit_samples = []
+        commits_per_repo = max(5, limit // 10)  # Collect from top 10 repos
+
+        # Sort by recent activity
+        sorted_repos = sorted(
+            repos,
+            key=lambda x: x.get("updated_at", ""),
+            reverse=True
+        )[:10]
+
+        for repo in sorted_repos:
+            repo_name = repo.get("name")
+            if not repo_name or repo.get("fork", False):  # Skip forks
+                continue
+
+            try:
+                # Fetch recent commits
+                response = await client.get(
+                    f"{self.api_base}/repos/{username}/{repo_name}/commits",
+                    headers=self.headers,
+                    params={"per_page": commits_per_repo}
+                )
+
+                if response.status_code == 200:
+                    commits = response.json()
+
+                    for commit in commits:
+                        commit_data = commit.get("commit", {})
+                        author = commit_data.get("author", {})
+
+                        commit_samples.append({
+                            "repo_name": repo_name,
+                            "repo_language": repo.get("language"),
+                            "message": commit_data.get("message", ""),
+                            "date": author.get("date"),
+                            "author_name": author.get("name"),
+                            "sha": commit.get("sha", "")[:7]  # Short SHA
+                        })
+
+                    logger.debug(f"Collected {len(commits)} commits from {repo_name}")
+
+                if len(commit_samples) >= limit:
+                    break
+
+            except Exception as e:
+                logger.debug(f"Could not fetch commits for {repo_name}: {e}")
+                continue
+
+        logger.info(f"Collected {len(commit_samples)} commit samples")
+        return commit_samples[:limit]
+
+    def _calculate_commit_statistics(self, commits: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Calculate commit pattern statistics for GPT analysis.
+
+        Args:
+            commits: List of commit samples
+
+        Returns:
+            Dictionary with commit statistics
+        """
+        if not commits:
+            return {
+                "total_commits": 0,
+                "avg_message_length": 0,
+                "has_conventional_commits": False,
+                "languages_committed": [],
+                "commit_frequency": "unknown"
+            }
+
+        from datetime import datetime
+        from collections import Counter
+
+        # Parse commit messages
+        message_lengths = [len(c["message"]) for c in commits]
+
+        # Check for conventional commits (feat:, fix:, docs:, etc.)
+        conventional_patterns = ["feat:", "fix:", "docs:", "style:", "refactor:", "test:", "chore:"]
+        conventional_count = sum(
+            1 for c in commits
+            if any(c["message"].lower().startswith(p) for p in conventional_patterns)
+        )
+
+        # Language distribution
+        languages = Counter(c.get("repo_language") for c in commits if c.get("repo_language"))
+
+        # Calculate commit frequency
+        try:
+            dates = [datetime.fromisoformat(c["date"].replace("Z", "+00:00")) for c in commits if c.get("date")]
+            if len(dates) >= 2:
+                date_range = (max(dates) - min(dates)).days
+                commits_per_day = len(dates) / max(1, date_range)
+
+                if commits_per_day >= 1:
+                    frequency = "daily"
+                elif commits_per_day >= 0.5:
+                    frequency = "several_per_week"
+                elif commits_per_day >= 0.2:
+                    frequency = "weekly"
+                else:
+                    frequency = "occasional"
+            else:
+                frequency = "insufficient_data"
+        except Exception:
+            frequency = "unknown"
+
+        return {
+            "total_commits": len(commits),
+            "avg_message_length": sum(message_lengths) / len(message_lengths) if message_lengths else 0,
+            "has_conventional_commits": conventional_count > len(commits) * 0.3,  # 30% threshold
+            "conventional_commit_percentage": (conventional_count / len(commits) * 100) if commits else 0,
+            "languages_committed": dict(languages.most_common(5)),
+            "commit_frequency": frequency,
+            "repos_with_commits": len(set(c["repo_name"] for c in commits))
+        }
 
     def extract_skills(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """

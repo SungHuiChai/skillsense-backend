@@ -167,12 +167,13 @@ Base your analysis on:
             "recommended_roles": ["Software Developer", "Full Stack Engineer"]
         }
 
-    async def extract_skills_from_github(self, github_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def extract_skills_from_github(self, github_data: Dict[str, Any], resume_content: Optional[str] = None) -> Dict[str, Any]:
         """
-        Extract structured skills from GitHub data using GPT-4o
+        Extract structured skills from GitHub data and resume/CV content using GPT-4o
 
         Args:
             github_data: GitHub profile and repository data
+            resume_content: Optional raw text content from resume/CV
 
         Returns:
             Dict containing:
@@ -185,11 +186,15 @@ Base your analysis on:
         """
         if not self.client:
             logger.error("OpenAI client not initialized")
-            return self._fallback_extraction(github_data)
+            return self._fallback_extraction(github_data, resume_content)
 
         try:
             # Prepare context for GPT-4o
             context = self._prepare_github_context(github_data)
+            
+            # Add resume content if available
+            if resume_content:
+                context += f"\n\n=== RESUME/CV CONTENT ===\n{resume_content}\n"
 
             # Call GPT-4o
             response = self.client.chat.completions.create(
@@ -197,8 +202,12 @@ Base your analysis on:
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are an expert technical recruiter analyzing GitHub profiles.
-Extract structured skills data from the GitHub profile and repository information.
+                        "content": """You are an expert technical recruiter analyzing candidate profiles.
+Extract structured skills data from the GitHub profile, repository information, AND resume/CV content.
+
+Analyze BOTH sources comprehensively:
+- GitHub data shows actual code contributions and project work
+- Resume/CV content shows claimed experience, work history, and skills listed
 
 Return a JSON object with:
 {
@@ -212,14 +221,20 @@ Return a JSON object with:
 }
 
 Infer proficiency from:
-- Number of repositories using the technology
-- Complexity of projects
-- Recency of usage
-- Commit patterns"""
+- Number of repositories using the technology (GitHub)
+- Complexity of projects (GitHub)
+- Recency of usage (GitHub)
+- Commit patterns (GitHub)
+- Years of experience mentioned (Resume/CV)
+- Work history and job descriptions (Resume/CV)
+- Skills explicitly listed (Resume/CV)
+
+When both sources mention the same skill, use the higher proficiency level.
+Prioritize skills that appear in BOTH GitHub and Resume for higher confidence."""
                     },
                     {
                         "role": "user",
-                        "content": f"Analyze this GitHub profile and extract skills:\n\n{context}"
+                        "content": f"Analyze this candidate profile and extract skills:\n\n{context}"
                     }
                 ],
                 response_format={"type": "json_object"},
@@ -230,12 +245,12 @@ Infer proficiency from:
             # Parse response
             result = json.loads(response.choices[0].message.content)
 
-            logger.info(f"Successfully extracted skills using GPT-4o")
+            logger.info(f"Successfully extracted skills using GPT-4o (with{'out' if not resume_content else ''} resume content)")
             return result
 
         except Exception as e:
             logger.error(f"Error calling OpenAI API: {e}")
-            return self._fallback_extraction(github_data)
+            return self._fallback_extraction(github_data, resume_content)
 
     def _prepare_github_context(self, github_data: Dict[str, Any]) -> str:
         """
@@ -297,12 +312,13 @@ Infer proficiency from:
 
         return "\n".join(context_parts)
 
-    def _fallback_extraction(self, github_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _fallback_extraction(self, github_data: Dict[str, Any], resume_content: Optional[str] = None) -> Dict[str, Any]:
         """
         Fallback skill extraction without OpenAI (rule-based)
 
         Args:
             github_data: GitHub data
+            resume_content: Optional resume/CV content
 
         Returns:
             Basic skills extraction
@@ -324,8 +340,22 @@ Infer proficiency from:
         if github_data.get('frameworks'):
             frameworks = [{"name": fw, "category": "unknown"} for fw in github_data['frameworks']]
 
+        # Extract basic skills from resume if available
+        resume_skills = []
+        if resume_content:
+            # Simple keyword extraction from resume
+            common_skills = ['python', 'javascript', 'java', 'react', 'node', 'sql', 'aws', 'docker', 'kubernetes']
+            resume_lower = resume_content.lower()
+            for skill in common_skills:
+                if skill in resume_lower:
+                    resume_skills.append({"name": skill, "proficiency": "intermediate", "years_inferred": 2})
+
+        # Combine GitHub and resume skills
+        all_technical_skills = [{"name": tech, "proficiency": "intermediate", "years_inferred": 2} for tech in technologies]
+        all_technical_skills.extend(resume_skills)
+
         return {
-            "technical_skills": [{"name": tech, "proficiency": "intermediate", "years_inferred": 2} for tech in technologies],
+            "technical_skills": all_technical_skills,
             "frameworks": frameworks,
             "languages": languages,
             "tools": ["Git", "GitHub"],
@@ -380,20 +410,21 @@ Infer proficiency from:
             logger.error(f"Error generating profile summary: {e}")
             return "Experienced developer with strong technical skills"
 
-    async def comprehensive_analysis(self, github_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def comprehensive_analysis(self, github_data: Dict[str, Any], resume_content: Optional[str] = None) -> Dict[str, Any]:
         """
         Perform comprehensive analysis combining skills extraction and activity analysis
 
         Args:
             github_data: GitHub profile and repository data
+            resume_content: Optional raw text content from resume/CV
 
         Returns:
             Dict containing both skills and activity analysis
         """
-        logger.info("Starting comprehensive GitHub analysis")
+        logger.info("Starting comprehensive GitHub analysis" + (" with resume content" if resume_content else ""))
 
         # Run both analyses in parallel for efficiency
-        skills_task = self.extract_skills_from_github(github_data)
+        skills_task = self.extract_skills_from_github(github_data, resume_content)
         activity_task = self.analyze_developer_activity(github_data)
 
         skills_result = await skills_task
