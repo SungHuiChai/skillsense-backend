@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Admin
     ADMIN_EMAIL: str = "admin@skillsense.com"
-    ADMIN_PASSWORD: str = "admin123"
+    ADMIN_PASSWORD: str = "Admin@123"
 
     # Supabase (Optional)
     SUPABASE_URL: str = ""
@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     COLLECTION_TIMEOUT: int = 60
     MAX_COLLECTION_RETRIES: int = 3
     ENABLE_PARALLEL_COLLECTION: bool = True
+
+    # Phase 2: Throttling Configuration
+    GITHUB_CRAWL_COOLDOWN_SECONDS: int = 3600  # 1 hour between GitHub crawls per user
+    ENABLE_CRAWL_THROTTLING: bool = True
+
+    # OpenAI Configuration
+    OPENAI_API_KEY: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -2,7 +2,6 @@
 CV Submission model for tracking uploaded CVs
 """
 from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 import uuid
@@ -14,8 +13,8 @@ class CVSubmission(Base):
     """CV Submission model for tracking uploaded files"""
     __tablename__ = "cv_submissions"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     filename = Column(String(255), nullable=False)
     file_path = Column(String(500), nullable=False)
     file_size = Column(Integer)

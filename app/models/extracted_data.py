@@ -1,8 +1,7 @@
 """
 Extracted Data model for storing parsed CV information
 """
-from sqlalchemy import Column, String, DateTime, Text, Boolean, Numeric, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Column, String, DateTime, Text, Boolean, Numeric, ForeignKey, JSON
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 import uuid
@@ -14,8 +13,8 @@ class ExtractedData(Base):
     """Extracted data from CV with confidence scores"""
     __tablename__ = "extracted_data"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    submission_id = Column(UUID(as_uuid=True), ForeignKey("cv_submissions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    submission_id = Column(String(36), ForeignKey("cv_submissions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
 
     # Personal Information
     full_name = Column(String(255))
@@ -38,12 +37,12 @@ class ExtractedData(Base):
     twitter_url_confidence = Column(Numeric(5, 2))
     other_urls = Column(Text)  # JSON string of other URLs
 
-    # Extracted Sections (JSONB for flexible structure)
-    work_history = Column(JSONB)  # Array of work experiences
-    education = Column(JSONB)  # Array of education entries
-    skills = Column(JSONB)  # Array of skills
-    certifications = Column(JSONB)  # Array of certifications
-    languages = Column(JSONB)  # Array of languages
+    # Extracted Sections (JSON for flexible structure)
+    work_history = Column(JSON)  # Array of work experiences
+    education = Column(JSON)  # Array of education entries
+    skills = Column(JSON)  # Array of skills
+    certifications = Column(JSON)  # Array of certifications
+    languages = Column(JSON)  # Array of languages
 
     # Metadata
     extraction_method = Column(String(50))  # 'regex', 'spacy', 'llm', 'hybrid'
@@ -70,8 +69,8 @@ class UserEdit(Base):
     """Track user edits to extracted data"""
     __tablename__ = "user_edits"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    extracted_data_id = Column(UUID(as_uuid=True), ForeignKey("extracted_data.id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    extracted_data_id = Column(String(36), ForeignKey("extracted_data.id", ondelete="CASCADE"), nullable=False, index=True)
     field_name = Column(String(100), nullable=False)
     original_value = Column(Text)
     edited_value = Column(Text)

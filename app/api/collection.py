@@ -189,3 +189,167 @@ def get_collection_results(
         )
 
     return results
+
+
+@router.get("/analysis/{submission_id}")
+def get_github_analysis(
+    submission_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get stored GitHub analysis results for a submission.
+
+    Returns the comprehensive GPT-4o analysis including skills, activity patterns,
+    and professional insights that were automatically generated after GitHub crawling.
+
+    Args:
+        submission_id: UUID of the CV submission
+        db: Database session
+        current_user: Authenticated user
+
+    Returns:
+        Dict with complete analysis data including skills and activity analysis
+
+    Raises:
+        HTTPException: 404 if not found or unauthorized
+    """
+    from app.models.collected_data import GitHubAnalysis, GitHubData
+
+    logger.info(f"User {current_user.email} retrieving GitHub analysis for {submission_id}")
+
+    # Verify submission belongs to user
+    orchestrator = CollectionOrchestrator(db)
+    submission = orchestrator.get_submission(str(submission_id), str(current_user.id))
+
+    if not submission:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Submission not found"
+        )
+
+    # Get analysis data
+    analysis = db.query(GitHubAnalysis).filter(
+        GitHubAnalysis.submission_id == str(submission_id)
+    ).first()
+
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No GitHub analysis found. Analysis may still be in progress or GitHub crawling may not have completed."
+        )
+
+    # Get associated GitHub data for context
+    github_data = db.query(GitHubData).filter(
+        GitHubData.id == analysis.github_data_id
+    ).first()
+
+    return {
+        "submission_id": str(submission_id),
+        "github_username": github_data.username if github_data else None,
+        "skills_analysis": {
+            "technical_skills": analysis.technical_skills,
+            "frameworks": analysis.frameworks,
+            "languages": analysis.languages,
+            "tools": analysis.tools,
+            "domains": analysis.domains,
+            "soft_skills": analysis.soft_skills,
+            "skill_summary": analysis.skill_summary
+        },
+        "activity_analysis": {
+            "activity_level": analysis.activity_level,
+            "commit_quality_score": analysis.commit_quality_score,
+            "contribution_consistency": analysis.contribution_consistency,
+            "collaboration_score": analysis.collaboration_score,
+            "project_diversity": analysis.project_diversity,
+            "strengths": analysis.strengths,
+            "areas_for_growth": analysis.areas_for_growth,
+            "insights": {
+                "activity_insights": analysis.activity_insights,
+                "commit_quality_insights": analysis.commit_quality_insights,
+                "collaboration_insights": analysis.collaboration_insights,
+                "project_insights": analysis.project_insights
+            }
+        },
+        "professional_summary": analysis.professional_summary,
+        "recommended_roles": analysis.recommended_roles,
+        "analyzed_at": analysis.analyzed_at.isoformat() if analysis.analyzed_at else None
+    }
+
+
+@router.post("/analyze-github/{submission_id}")
+async def analyze_github_with_ai(
+    submission_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Analyze GitHub data using GPT-4o to extract structured skills
+
+    Args:
+        submission_id: UUID of the CV submission
+        db: Database session
+        current_user: Authenticated user
+
+    Returns:
+        Dict with extracted skills and analysis
+
+    Raises:
+        HTTPException: 404 if not found, 500 if analysis fails
+    """
+    from app.models.collected_data import GitHubData
+    from app.services.openai_analyzer import OpenAIAnalyzer
+
+    logger.info(f"User {current_user.email} requesting AI analysis for {submission_id}")
+
+    # Get GitHub data
+    orchestrator = CollectionOrchestrator(db)
+    submission = orchestrator.get_submission(str(submission_id), str(current_user.id))
+
+    if not submission:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Submission not found"
+        )
+
+    # Get GitHub data for this submission
+    github_data = db.query(GitHubData).filter(
+        GitHubData.submission_id == str(submission_id)
+    ).first()
+
+    if not github_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No GitHub data found. Please ensure GitHub crawling has completed."
+        )
+
+    # Prepare data for analysis
+    github_dict = {
+        'username': github_data.username,
+        'name': github_data.name,
+        'bio': github_data.bio,
+        'location': github_data.location,
+        'company': github_data.company,
+        'blog': github_data.blog,
+        'email': github_data.email,
+        'public_repos': github_data.public_repos,
+        'public_gists': github_data.public_gists,
+        'followers': github_data.followers,
+        'following': github_data.following,
+        'repositories': github_data.repositories,
+        'languages': github_data.languages,
+        'top_repos': github_data.top_repos,
+        'technologies': github_data.technologies,
+        'frameworks': github_data.frameworks
+    }
+
+    # Analyze with OpenAI
+    analyzer = OpenAIAnalyzer()
+    skills_analysis = await analyzer.extract_skills_from_github(github_dict)
+
+    return {
+        "submission_id": str(submission_id),
+        "github_username": github_data.username,
+        "analysis": skills_analysis,
+        "collected_at": github_data.collected_at.isoformat() if github_data.collected_at else None
+    }

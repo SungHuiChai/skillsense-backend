@@ -2,19 +2,24 @@
 Extraction API endpoints
 Get, validate, and update extracted CV data
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 from datetime import datetime
 from typing import Dict, Any
-from uuid import UUID
+import logging
 
 from app.database import get_db
 from app.models import User, CVSubmission, ExtractedData, UserEdit
+from app.models.collected_data import CollectedSource
 from app.schemas import (
     ExtractedDataResponse, ExtractedDataUpdate,
     ExtractionStatusResponse, UserEditCreate
 )
 from app.core import get_current_user
+from app.services.link_validator import LinkValidator
+from app.services.throttle_service import ThrottleService
+from app.services.collection_orchestrator import CollectionOrchestrator
 
 router = APIRouter(prefix="/extraction", tags=["Extraction"])
 
@@ -88,7 +93,7 @@ def format_extracted_data(extracted_data: ExtractedData, submission: CVSubmissio
 
 @router.get("/{submission_id}", response_model=Dict[str, Any])
 async def get_extraction(
-    submission_id: UUID,
+    submission_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -145,7 +150,7 @@ async def get_extraction(
 
 @router.get("/{submission_id}/status", response_model=ExtractionStatusResponse)
 async def get_extraction_status(
-    submission_id: UUID,
+    submission_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -209,8 +214,9 @@ async def get_extraction_status(
 
 @router.put("/{submission_id}/validate", response_model=Dict[str, Any])
 async def validate_extraction(
-    submission_id: UUID,
+    submission_id: str,
     update_data: ExtractedDataUpdate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -229,6 +235,8 @@ async def validate_extraction(
     Raises:
         HTTPException: If submission not found or not authorized
     """
+    logger = logging.getLogger(__name__)
+
     # Get submission
     submission = db.query(CVSubmission).filter(CVSubmission.id == submission_id).first()
 
@@ -256,8 +264,11 @@ async def validate_extraction(
             detail="Extracted data not found"
         )
 
-    # Track user edits
+    # Track user edits and check if GitHub URL changed
     update_dict = update_data.model_dump(exclude_unset=True)
+    github_url_changed = False
+    old_github_url = extracted_data.github_url
+    new_github_url = None
 
     for field_name, new_value in update_dict.items():
         if field_name in ['is_validated', 'validation_notes']:
@@ -283,6 +294,14 @@ async def validate_extraction(
             # Update the field
             setattr(extracted_data, field_name, new_value)
 
+            # Track GitHub URL change
+            if field_name == 'github_url':
+                github_url_changed = True
+                new_github_url = new_value
+
+    # Check if this is the first validation
+    was_unvalidated = not extracted_data.is_validated
+
     # Mark as validated
     if update_data.is_validated:
         extracted_data.is_validated = True
@@ -296,12 +315,83 @@ async def validate_extraction(
     db.refresh(extracted_data)
     db.refresh(submission)
 
+    # Auto-trigger GitHub crawl if URL changed OR if first validation with GitHub URL
+    should_trigger_collection = github_url_changed and new_github_url
+
+    # Also trigger if first validation and GitHub URL exists
+    if not should_trigger_collection and was_unvalidated and update_data.is_validated:
+        if extracted_data.github_url:
+            should_trigger_collection = True
+            new_github_url = extracted_data.github_url
+
+    if should_trigger_collection and new_github_url:
+        logger.info(f"DEBUG: should_trigger_collection=True, new_github_url={new_github_url}")
+        try:
+            # Validate GitHub URL
+            validation_result = await LinkValidator.validate_github_url(new_github_url)
+            logger.info(f"DEBUG: validation_result={validation_result}")
+
+            # Only trigger if URL is valid and account exists
+            if (validation_result['is_valid_format'] and
+                validation_result.get('account_exists') is not False):
+
+                logger.info(f"DEBUG: GitHub URL is valid, checking throttle...")
+
+                # Check throttle
+                is_allowed, _, seconds_remaining = ThrottleService.check_throttle(
+                    db, str(current_user.id), 'github'
+                )
+
+                logger.info(f"DEBUG: Throttle check - is_allowed={is_allowed}, seconds_remaining={seconds_remaining}")
+
+                # Trigger crawl if allowed (silently skip if throttled)
+                if is_allowed:
+                    logger.info(f"DEBUG: Adding background task for collection")
+                    async def trigger_github_crawl():
+                        logger.info(f"DEBUG: Background task started for submission {submission_id}")
+                        try:
+                            orchestrator = CollectionOrchestrator(db)
+
+                            # Create or update source record
+                            existing_source = (
+                                db.query(CollectedSource)
+                                .filter(
+                                    and_(
+                                        CollectedSource.submission_id == submission_id,
+                                        CollectedSource.source_type == 'github'
+                                    )
+                                )
+                                .first()
+                            )
+
+                            if not existing_source:
+                                source_record = CollectedSource(
+                                    submission_id=submission_id,
+                                    source_type='github',
+                                    source_url=new_github_url,
+                                    status='pending'
+                                )
+                                db.add(source_record)
+                                db.commit()
+
+                            # Trigger full collection (includes Phase 2: GitHub + Phase 3: Web sources)
+                            await orchestrator.collect_all_sources(submission_id)
+                        except Exception as e:
+                            # Log but don't fail the request
+                            logger.error(f"Error in background collection: {e}")
+
+                    background_tasks.add_task(trigger_github_crawl)
+
+        except Exception as e:
+            # Log validation error but don't fail the update
+            logger.warning(f"GitHub URL validation failed: {e}")
+
     return format_extracted_data(extracted_data, submission)
 
 
 @router.get("/{submission_id}/edits", response_model=list)
 async def get_user_edits(
-    submission_id: UUID,
+    submission_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):

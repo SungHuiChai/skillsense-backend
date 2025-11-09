@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 from app.database import get_db
 from app.models import User, CVSubmission, ExtractedData
+from app.models.collected_data import CollectedSource, GitHubData
 from app.schemas import CVSubmissionListResponse
 from app.core import get_current_admin
 
@@ -275,6 +276,75 @@ async def get_statistics(
         for activity in recent_activity
     ]
 
+    # Phase 2: GitHub Crawling Statistics
+    total_collections = db.query(func.count(CollectedSource.id)).scalar() or 0
+
+    # Collection status breakdown
+    collection_status_counts = db.query(
+        CollectedSource.status,
+        func.count(CollectedSource.id)
+    ).group_by(CollectedSource.status).all()
+
+    collection_status_breakdown = {status: count for status, count in collection_status_counts}
+
+    # Collections by source type
+    source_type_counts = db.query(
+        CollectedSource.source_type,
+        func.count(CollectedSource.id)
+    ).group_by(CollectedSource.source_type).all()
+
+    source_type_breakdown = {source: count for source, count in source_type_counts}
+
+    # GitHub profiles collected
+    total_github_profiles = db.query(func.count(GitHubData.id)).scalar() or 0
+
+    # Collections in last 24 hours
+    twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+    recent_collections = db.query(
+        func.count(CollectedSource.id)
+    ).filter(
+        CollectedSource.created_at >= twenty_four_hours_ago
+    ).scalar() or 0
+
+    # Failed collections in last 24 hours
+    recent_failures = db.query(
+        func.count(CollectedSource.id)
+    ).filter(
+        CollectedSource.status == 'failed',
+        CollectedSource.completed_at >= twenty_four_hours_ago
+    ).scalar() or 0
+
+    # Active (collecting) right now
+    active_collections = db.query(
+        func.count(CollectedSource.id)
+    ).filter(
+        CollectedSource.status == 'collecting'
+    ).scalar() or 0
+
+    # Recent collection activity (last 10)
+    recent_collection_activity = db.query(
+        CollectedSource.source_type,
+        CollectedSource.source_url,
+        CollectedSource.status,
+        CollectedSource.started_at,
+        CollectedSource.completed_at,
+        CollectedSource.error_message
+    ).order_by(
+        CollectedSource.created_at.desc()
+    ).limit(10).all()
+
+    formatted_collection_activity = [
+        {
+            "source_type": activity[0],
+            "source_url": activity[1],
+            "status": activity[2],
+            "started_at": activity[3].isoformat() if activity[3] else None,
+            "completed_at": activity[4].isoformat() if activity[4] else None,
+            "error_message": activity[5]
+        }
+        for activity in recent_collection_activity
+    ]
+
     return {
         "overview": {
             "total_submissions": total_submissions,
@@ -285,7 +355,18 @@ async def get_statistics(
         },
         "status_breakdown": status_breakdown,
         "file_type_breakdown": file_type_breakdown,
-        "recent_activity": formatted_activity
+        "recent_activity": formatted_activity,
+        # Phase 2: Collection Statistics
+        "collection_stats": {
+            "total_collections": total_collections,
+            "total_github_profiles": total_github_profiles,
+            "recent_collections_24h": recent_collections,
+            "recent_failures_24h": recent_failures,
+            "active_collections": active_collections,
+            "collection_status_breakdown": collection_status_breakdown,
+            "source_type_breakdown": source_type_breakdown
+        },
+        "recent_collection_activity": formatted_collection_activity
     }
 
 

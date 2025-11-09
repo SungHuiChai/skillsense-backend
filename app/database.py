@@ -38,5 +38,5 @@ def get_db() -> Generator[Session, None, None]:
 def init_db():
     """Initialize database - create all tables"""
     # Import all models here to ensure they're registered
-    from app.models import user, cv_submission, extracted_data
+    from app.models import user, cv_submission, extracted_data, collected_data
     Base.metadata.create_all(bind=engine)

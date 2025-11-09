@@ -123,6 +123,7 @@ async def upload_cv(
 ):
     """
     Upload CV file for processing
+    Each user can only have one CV - uploading a new one replaces the existing one
 
     Args:
         file: Uploaded CV file (PDF, DOCX, TXT)
@@ -135,6 +136,27 @@ async def upload_cv(
     Raises:
         HTTPException: If file validation fails
     """
+    # Check if user already has a CV submission
+    existing_submission = db.query(CVSubmission).filter(
+        CVSubmission.user_id == current_user.id
+    ).first()
+
+    # If user has existing CV, delete it
+    if existing_submission:
+        # Delete old file from disk
+        import os
+        if existing_submission.file_path and os.path.exists(existing_submission.file_path):
+            try:
+                os.remove(existing_submission.file_path)
+            except Exception as e:
+                # Log error but continue
+                print(f"Warning: Could not delete old file {existing_submission.file_path}: {e}")
+
+        # Delete old extracted data (CASCADE will handle this via relationship)
+        # Delete the submission (this will cascade to extracted_data)
+        db.delete(existing_submission)
+        db.commit()
+
     # Validate file type
     file_type = validate_file_type(file.filename)
 
@@ -165,15 +187,18 @@ async def upload_cv(
         settings.DATABASE_URL
     )
 
+    is_update = existing_submission is not None
+    message = "CV updated successfully. Processing will begin shortly." if is_update else "CV uploaded successfully. Processing will begin shortly."
+
     return CVUploadResponse(
         submission_id=submission.id,
         filename=file.filename,
         status=submission.status,
-        message="CV uploaded successfully. Processing will begin shortly."
+        message=message
     )
 
 
-@router.get("/submissions", response_model=list)
+@router.get("/submissions", response_model=list[CVUploadResponse])
 async def get_my_submissions(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -192,4 +217,13 @@ async def get_my_submissions(
         CVSubmission.user_id == current_user.id
     ).order_by(CVSubmission.uploaded_at.desc()).all()
 
-    return submissions
+    # Convert to response model format
+    return [
+        CVUploadResponse(
+            submission_id=str(sub.id),
+            filename=sub.filename,
+            status=sub.status,
+            message=f"Uploaded {sub.uploaded_at.strftime('%Y-%m-%d %H:%M') if sub.uploaded_at else 'recently'}"
+        )
+        for sub in submissions
+    ]

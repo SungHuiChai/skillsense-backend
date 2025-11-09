@@ -15,6 +15,10 @@ from app.schemas.extracted_data import (
     UserEditCreate, UserEditResponse,
     PersonalInfo, SocialLinks, WorkExperience, Education, Skill
 )
+from app.schemas.profile import (
+    SocialLinksUpdate, GitHubValidationRequest, GitHubValidationResponse,
+    GitHubSyncStatusResponse, ProfileResponse, SocialLinksUpdateResponse
+)
 
 __all__ = [
     # User schemas
@@ -27,5 +31,8 @@ __all__ = [
     "ExtractedDataCreate", "ExtractedDataUpdate", "ExtractedDataResponse",
     "ExtractedDataDetailed", "ExtractionStatusResponse",
     "UserEditCreate", "UserEditResponse",
-    "PersonalInfo", "SocialLinks", "WorkExperience", "Education", "Skill"
+    "PersonalInfo", "SocialLinks", "WorkExperience", "Education", "Skill",
+    # Profile schemas
+    "SocialLinksUpdate", "GitHubValidationRequest", "GitHubValidationResponse",
+    "GitHubSyncStatusResponse", "ProfileResponse", "SocialLinksUpdateResponse"
 ]

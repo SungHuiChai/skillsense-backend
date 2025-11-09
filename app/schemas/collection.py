@@ -52,9 +52,21 @@ class GitHubDataResponse(BaseModel):
     """GitHub data in collection results"""
     username: Optional[str] = None
     name: Optional[str] = None
-    repos: Optional[int] = None
-    languages: Optional[Dict[str, int]] = None
-    technologies: Optional[List[str]] = None
+    bio: Optional[str] = None
+    location: Optional[str] = None
+    company: Optional[str] = None
+    blog: Optional[str] = None
+    email: Optional[str] = None
+    public_repos: Optional[int] = None
+    public_gists: Optional[int] = None
+    followers: Optional[int] = None
+    following: Optional[int] = None
+    repositories: Optional[List[Dict]] = []
+    languages: Optional[Dict[str, int]] = {}
+    top_repos: Optional[List[Dict]] = []
+    technologies: Optional[List[str]] = []
+    frameworks: Optional[List[str]] = []
+    collected_at: Optional[str] = None
 
     class Config:
         from_attributes = True

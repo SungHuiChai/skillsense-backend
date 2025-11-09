@@ -138,8 +138,29 @@ class CollectionOrchestrator:
         else:
             logger.warning("No sources available for collection")
 
+        # Phase 3: Trigger web source processing after collection completes
+        # Run this BEFORE aggregation so it always executes even if aggregation fails
+        try:
+            from app.services.web_source_orchestrator import get_web_orchestrator
+            logger.info(f"Triggering Phase 3 web source processing for submission: {submission_id}")
+            orchestrator = get_web_orchestrator()
+            await orchestrator.process_submission(
+                submission_id=submission_id,
+                db=self.db,
+                force_reprocess=False
+            )
+            logger.info(f"Phase 3 processing completed for submission: {submission_id}")
+        except Exception as e:
+            logger.error(f"Error in Phase 3 processing: {e}")
+            # Don't fail the whole collection if Phase 3 fails
+
         # Aggregate collected data
-        await self._aggregate_data(submission_id)
+        # Wrap in try-except to handle duplicate entry errors gracefully
+        try:
+            await self._aggregate_data(submission_id)
+        except Exception as e:
+            logger.error(f"Error during aggregation: {e}")
+            # Continue even if aggregation fails (e.g., duplicate entries)
 
         return {
             "submission_id": submission_id,
@@ -265,6 +286,10 @@ class CollectionOrchestrator:
             self.db.commit()
 
             logger.info(f"Successfully collected GitHub data for: {github_data.get('username')}")
+
+            # Auto-trigger GPT-4o analysis
+            await self._analyze_github_with_ai(submission_id, github_record)
+
             return {"status": "success", "data": github_data}
 
         except Exception as e:
@@ -455,11 +480,23 @@ class CollectionOrchestrator:
         return {
             "submission_id": submission_id,
             "github": {
-                "username": github_data.username if github_data else None,
-                "name": github_data.name if github_data else None,
-                "repos": github_data.public_repos if github_data else None,
-                "languages": github_data.languages if github_data else None,
-                "technologies": github_data.technologies if github_data else None
+                "username": github_data.username,
+                "name": github_data.name,
+                "bio": github_data.bio,
+                "location": github_data.location,
+                "company": github_data.company,
+                "blog": github_data.blog,
+                "email": github_data.email,
+                "public_repos": github_data.public_repos,
+                "public_gists": github_data.public_gists,
+                "followers": github_data.followers,
+                "following": github_data.following,
+                "repositories": github_data.repositories or [],
+                "languages": github_data.languages or {},
+                "top_repos": github_data.top_repos or [],
+                "technologies": github_data.technologies or [],
+                "frameworks": github_data.frameworks or [],
+                "collected_at": github_data.collected_at.isoformat() if github_data.collected_at else None
             } if github_data else None,
             "web_mentions": [
                 {
@@ -476,3 +513,163 @@ class CollectionOrchestrator:
                 "overall_quality_score": float(aggregated.overall_quality_score) if aggregated and aggregated.overall_quality_score else None
             } if aggregated else None
         }
+
+    async def _analyze_github_with_ai(self, submission_id: str, github_data):
+        """
+        Analyze GitHub data with GPT-4o and save results
+
+        Args:
+            submission_id: Submission UUID
+            github_data: GitHubData model instance
+        """
+        try:
+            from app.services.openai_analyzer import OpenAIAnalyzer
+            from app.models.collected_data import GitHubAnalysis
+
+            logger.info(f"Starting GPT-4o analysis for submission {submission_id}")
+
+            # Prepare GitHub data dict
+            github_dict = {
+                'username': github_data.username,
+                'name': github_data.name,
+                'bio': github_data.bio,
+                'location': github_data.location,
+                'company': github_data.company,
+                'blog': github_data.blog,
+                'email': github_data.email,
+                'public_repos': github_data.public_repos,
+                'public_gists': github_data.public_gists,
+                'followers': github_data.followers,
+                'following': github_data.following,
+                'repositories': github_data.repositories,
+                'languages': github_data.languages,
+                'top_repos': github_data.top_repos,
+                'technologies': github_data.technologies,
+                'frameworks': github_data.frameworks
+            }
+
+            # Analyze with OpenAI
+            analyzer = OpenAIAnalyzer()
+            analysis_result = await analyzer.comprehensive_analysis(github_dict)
+
+            skills_analysis = analysis_result.get('skills_analysis', {})
+            activity_analysis = analysis_result.get('activity_analysis', {})
+
+            # Check if analysis already exists for this submission
+            existing_analysis = self.db.query(GitHubAnalysis).filter(
+                GitHubAnalysis.submission_id == submission_id
+            ).first()
+
+            if existing_analysis:
+                # Update existing analysis
+                logger.info(f"Updating existing GitHub analysis for submission {submission_id}")
+                existing_analysis.github_data_id = github_data.id
+                existing_analysis.technical_skills = skills_analysis.get('technical_skills')
+                existing_analysis.frameworks = skills_analysis.get('frameworks')
+                existing_analysis.languages = skills_analysis.get('languages')
+                existing_analysis.tools = skills_analysis.get('tools')
+                existing_analysis.domains = skills_analysis.get('domains')
+                existing_analysis.soft_skills = skills_analysis.get('soft_skills')
+                existing_analysis.skill_summary = skills_analysis.get('skill_summary')
+                existing_analysis.activity_level = activity_analysis.get('activity_level')
+                existing_analysis.commit_quality_score = activity_analysis.get('commit_quality_score')
+                existing_analysis.contribution_consistency = activity_analysis.get('contribution_consistency')
+                existing_analysis.collaboration_score = activity_analysis.get('collaboration_score')
+                existing_analysis.project_diversity = activity_analysis.get('project_diversity')
+                existing_analysis.strengths = activity_analysis.get('strengths')
+                existing_analysis.areas_for_growth = activity_analysis.get('areas_for_growth')
+                existing_analysis.activity_insights = activity_analysis.get('insights', {}).get('activity_insights')
+                existing_analysis.commit_quality_insights = activity_analysis.get('insights', {}).get('commit_quality_insights')
+                existing_analysis.collaboration_insights = activity_analysis.get('insights', {}).get('collaboration_insights')
+                existing_analysis.project_insights = activity_analysis.get('insights', {}).get('project_insights')
+                existing_analysis.professional_summary = activity_analysis.get('professional_summary')
+                existing_analysis.recommended_roles = activity_analysis.get('recommended_roles')
+                existing_analysis.raw_analysis = analysis_result
+            else:
+                # Create new analysis
+                logger.info(f"Creating new GitHub analysis for submission {submission_id}")
+                analysis_record = GitHubAnalysis(
+                    submission_id=submission_id,
+                    github_data_id=github_data.id,
+                    # Skills
+                    technical_skills=skills_analysis.get('technical_skills'),
+                    frameworks=skills_analysis.get('frameworks'),
+                    languages=skills_analysis.get('languages'),
+                    tools=skills_analysis.get('tools'),
+                    domains=skills_analysis.get('domains'),
+                    soft_skills=skills_analysis.get('soft_skills'),
+                    skill_summary=skills_analysis.get('skill_summary'),
+                    # Activity
+                    activity_level=activity_analysis.get('activity_level'),
+                    commit_quality_score=activity_analysis.get('commit_quality_score'),
+                    contribution_consistency=activity_analysis.get('contribution_consistency'),
+                    collaboration_score=activity_analysis.get('collaboration_score'),
+                    project_diversity=activity_analysis.get('project_diversity'),
+                    strengths=activity_analysis.get('strengths'),
+                    areas_for_growth=activity_analysis.get('areas_for_growth'),
+                    activity_insights=activity_analysis.get('insights', {}).get('activity_insights'),
+                    commit_quality_insights=activity_analysis.get('insights', {}).get('commit_quality_insights'),
+                    collaboration_insights=activity_analysis.get('insights', {}).get('collaboration_insights'),
+                    project_insights=activity_analysis.get('insights', {}).get('project_insights'),
+                    professional_summary=activity_analysis.get('professional_summary'),
+                    recommended_roles=activity_analysis.get('recommended_roles'),
+                    raw_analysis=analysis_result
+                )
+                self.db.add(analysis_record)
+
+            self.db.commit()
+
+            logger.info(f"GPT-4o analysis completed and saved for submission {submission_id}")
+
+            # Update extracted_data with merged skills
+            await self._merge_skills_to_extracted_data(submission_id, skills_analysis)
+
+        except Exception as e:
+            logger.error(f"Error in GPT-4o analysis: {e}")
+            # Don't fail the GitHub collection if analysis fails
+
+    async def _merge_skills_to_extracted_data(self, submission_id: str, skills_analysis: dict):
+        """
+        Merge GitHub-extracted skills with CV extracted data
+
+        Args:
+            submission_id: Submission UUID
+            skills_analysis: Skills analysis from GPT-4o
+        """
+        try:
+            from app.models.extracted_data import ExtractedData
+
+            extracted_data = self.db.query(ExtractedData).filter(
+                ExtractedData.submission_id == submission_id
+            ).first()
+
+            if not extracted_data:
+                logger.warning(f"No extracted data found for submission {submission_id}")
+                return
+
+            # Merge skills from CV and GitHub
+            existing_skills = extracted_data.skills or []
+            github_skills = skills_analysis.get('technical_skills', [])
+
+            # Convert to skill names for comparison
+            existing_skill_names = {skill.get('name', '').lower() for skill in existing_skills if isinstance(skill, dict)}
+
+            # Add GitHub skills that aren't already in CV skills
+            for github_skill in github_skills:
+                skill_name = github_skill.get('name', '')
+                if skill_name.lower() not in existing_skill_names:
+                    # Add new skill with GitHub source
+                    existing_skills.append({
+                        'name': skill_name,
+                        'source': 'github',
+                        'proficiency': github_skill.get('proficiency'),
+                        'confidence': 85  # GitHub-derived skills have high confidence
+                    })
+
+            extracted_data.skills = existing_skills
+            self.db.commit()
+
+            logger.info(f"Merged GitHub skills into extracted data for submission {submission_id}")
+
+        except Exception as e:
+            logger.error(f"Error merging skills: {e}")

@@ -4,8 +4,11 @@ Validates URLs and checks if they are accessible
 """
 import re
 import requests
-from typing import Tuple
+from typing import Tuple, Optional, Dict
 from urllib.parse import urlparse
+import httpx
+
+from app.config import settings
 
 
 class LinkValidator:
@@ -116,3 +119,159 @@ class LinkValidator:
         is_accessible = True  # Skip actual HTTP check for now to avoid delays
 
         return is_valid_format, is_correct_domain, is_accessible
+
+    @staticmethod
+    def extract_github_username(url: str) -> Optional[str]:
+        """
+        Extract GitHub username from URL
+
+        Args:
+            url: GitHub URL (e.g., 'https://github.com/username' or 'github.com/username')
+
+        Returns:
+            Optional[str]: Username if found, None otherwise
+        """
+        if not url:
+            return None
+
+        # Add https:// if not present
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+
+        # Parse URL
+        try:
+            parsed = urlparse(url)
+
+            # Check if it's a GitHub URL
+            if 'github.com' not in parsed.netloc.lower():
+                return None
+
+            # Extract path parts
+            path_parts = [p for p in parsed.path.split('/') if p]
+
+            if not path_parts:
+                return None
+
+            # First part should be the username
+            username = path_parts[0]
+
+            # Validate username format (GitHub usernames: alphanumeric and hyphens, max 39 chars)
+            username_pattern = re.compile(r'^[a-zA-Z0-9][-a-zA-Z0-9]{0,38}$')
+
+            if username_pattern.match(username):
+                return username
+
+            return None
+
+        except Exception:
+            return None
+
+    @staticmethod
+    async def validate_github_url(url: str) -> Dict[str, any]:
+        """
+        Validate GitHub URL format and check if account exists
+
+        Args:
+            url: GitHub URL to validate
+
+        Returns:
+            Dict with keys:
+                - is_valid_format: bool
+                - username: Optional[str]
+                - account_exists: Optional[bool]
+                - error_message: Optional[str]
+                - profile_data: Optional[Dict] (basic profile info if exists)
+        """
+        result = {
+            'is_valid_format': False,
+            'username': None,
+            'account_exists': None,
+            'error_message': None,
+            'profile_data': None
+        }
+
+        # Extract username
+        username = LinkValidator.extract_github_username(url)
+
+        if not username:
+            result['error_message'] = 'Invalid GitHub URL format. Expected: https://github.com/username'
+            return result
+
+        result['is_valid_format'] = True
+        result['username'] = username
+
+        # Check if account exists using GitHub API
+        if not settings.GITHUB_TOKEN:
+            result['error_message'] = 'GitHub token not configured. Cannot verify account existence.'
+            result['account_exists'] = None  # Unknown
+            return result
+
+        try:
+            async with httpx.AsyncClient() as client:
+                headers = {
+                    'Authorization': f'token {settings.GITHUB_TOKEN}',
+                    'Accept': 'application/vnd.github.v3+json'
+                }
+
+                response = await client.get(
+                    f'https://api.github.com/users/{username}',
+                    headers=headers,
+                    timeout=5.0
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    result['account_exists'] = True
+                    result['profile_data'] = {
+                        'username': data.get('login'),
+                        'name': data.get('name'),
+                        'bio': data.get('bio'),
+                        'public_repos': data.get('public_repos'),
+                        'followers': data.get('followers')
+                    }
+                elif response.status_code == 404:
+                    result['account_exists'] = False
+                    result['error_message'] = f'GitHub account @{username} not found'
+                elif response.status_code == 403:
+                    result['account_exists'] = None
+                    result['error_message'] = 'GitHub API rate limit exceeded'
+                else:
+                    result['account_exists'] = None
+                    result['error_message'] = f'GitHub API error: {response.status_code}'
+
+        except httpx.TimeoutException:
+            result['account_exists'] = None
+            result['error_message'] = 'GitHub API request timed out'
+        except Exception as e:
+            result['account_exists'] = None
+            result['error_message'] = f'Error checking GitHub account: {str(e)}'
+
+        return result
+
+    @staticmethod
+    def validate_github_url_sync(url: str) -> Dict[str, any]:
+        """
+        Synchronous version of GitHub URL validation (format only, no API check)
+
+        Args:
+            url: GitHub URL to validate
+
+        Returns:
+            Dict with validation results
+        """
+        result = {
+            'is_valid_format': False,
+            'username': None,
+            'error_message': None
+        }
+
+        username = LinkValidator.extract_github_username(url)
+
+        if not username:
+            result['error_message'] = 'Invalid GitHub URL format. Expected: https://github.com/username'
+            return result
+
+        result['is_valid_format'] = True
+        result['username'] = username
+
+        return result
